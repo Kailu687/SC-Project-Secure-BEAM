@@ -1,215 +1,159 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-// ===== PIN CONFIGURATION =====
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ===== PIN CONFIG =====
 const int LASER_PIN   = 9;
 const int LDR_PIN     = A0;
 const int LED_PIN     = 13;
 const int BUZZER_PIN  = 3;
 
-// ===== LCD =====
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// ===== MORSE SETTINGS =====
+const int DOT = 400;           // ms for one dot; try 300-500 if needed
+const int DASH = DOT * 3;
+const int THRESH = 550;        // light <550 ⇒ laser ON
+const int WORD_GAP = DOT * 7;
 
-// ===== SYSTEM SETTINGS =====
-const int BIT_DELAY = 300;   // 300 ms per bit → stable for LDR
-int threshold = 600;         // Set by CAL
+// ===== STATE =====
 bool isReceiving = false;
 
-// ===== LCD Helper =====
-void lcdStatus(String l1, String l2) {
+// ===== LCD helper =====
+void lcdShow(String a, String b="") {
   lcd.clear();
-  lcd.setCursor(0,0); lcd.print(l1);
-  lcd.setCursor(0,1); lcd.print(l2);
+  lcd.setCursor(0,0); lcd.print(a);
+  lcd.setCursor(0,1); lcd.print(b);
 }
 
-// ===== SEND ONE BIT =====
-void sendBit(bool bitVal) {
-  digitalWrite(LASER_PIN, bitVal ? HIGH : LOW);
-  digitalWrite(LED_PIN,   bitVal ? HIGH : LOW);
-
-  if (bitVal) tone(BUZZER_PIN, 1200);
-  else noTone(BUZZER_PIN);
-
-  delay(BIT_DELAY);
+// ===== Morse lookup =====
+char decodeMorse(String s) {
+  const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const char* codes[] = {
+    ".-","-...","-.-.","-..",".","..-.","--.","....","..",
+    ".---","-.-",".-..","--","-.","---",".--.","--.-",".-.","...","-",
+    "..-","...-",".--","-..-","-.--","--..",
+    "-----",".----","..---","...--","....-",".....","-....","--...","---..","----."
+  };
+  for (int i=0;i<36;i++) if (s==codes[i]) return chars[i];
+  return '?';
 }
 
-// ===== SEND FULL MESSAGE =====
+String encodeMorse(char c) {
+  c = toupper(c);
+  const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const char* codes[] = {
+    ".-","-...","-.-.","-..",".","..-.","--.","....","..",
+    ".---","-.-",".-..","--","-.","---",".--.","--.-",".-.","...","-",
+    "..-","...-",".--","-..-","-.--","--..",
+    "-----",".----","..---","...--","....-",".....","-....","--...","---..","----."
+  };
+  for (int i=0;i<36;i++) if (c==chars[i]) return codes[i];
+  return "";
+}
+
+// ===== Send a dot/dash =====
+void sendPulse(int duration) {
+  digitalWrite(LASER_PIN,HIGH);
+  digitalWrite(LED_PIN,HIGH);
+  tone(BUZZER_PIN,1000);
+  delay(duration);
+  digitalWrite(LASER_PIN,LOW);
+  digitalWrite(LED_PIN,LOW);
+  noTone(BUZZER_PIN);
+  delay(DOT); // intra-element gap
+}
+
+// ===== Transmit message =====
 void transmitMessage(String msg) {
-  lcdStatus("Mode: TX", "Sending...");
-  Serial.println("\n[TX] Sending...");
+  lcdShow("TX Mode","Sending...");
+  Serial.println("\n[TX] Sending Morse...");
+  msg.toUpperCase();
 
-  msg += "<END>";
-
-  // ===== QUIET GAP BEFORE SYNC =====
-  digitalWrite(LASER_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
-  noTone(BUZZER_PIN);
-  delay(BIT_DELAY * 3);
-
-  // ===== SEND TWO SYNC BYTES (0x55) =====
-  for (int s = 0; s < 2; s++) {
-    byte sync = 0x55;  // 01010101
-    for (int b = 7; b >= 0; b--) {
-      sendBit((sync >> b) & 1);
-    }
-  }
-
-  // ===== SEND PAYLOAD =====
-  for (int i = 0; i < msg.length(); i++) {
+  for (int i=0;i<msg.length();i++) {
     char c = msg[i];
-    for (int b = 7; b >= 0; b--) {
-      sendBit((c >> b) & 1);
+    if (c==' ') { delay(WORD_GAP); continue; }
+
+    String code = encodeMorse(c);
+    for (int j=0;j<code.length();j++) {
+      if (code[j]=='.') sendPulse(DOT);
+      else if (code[j]=='-') sendPulse(DASH);
     }
+    delay(DOT*3); // gap between letters
   }
 
-  // Turn off
-  digitalWrite(LASER_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
-  noTone(BUZZER_PIN);
-
-  lcdStatus("TX Complete", "");
+  lcdShow("TX Done");
   Serial.println("[TX] Done.\n");
 }
 
-// ===== AUTO CALIBRATION =====
-void autoCalibrate() {
-  lcdStatus("CAL", "Cover LDR...");
-  Serial.println("\n[CAL] Starting...");
-
-  long darkSum = 0, brightSum = 0;
-
-  delay(1500);
-  for (int i=0; i<50; i++) { darkSum += analogRead(LDR_PIN); delay(20); }
-  int darkAvg = darkSum / 50;
-
-  Serial.print("[CAL] Dark avg = ");
-  Serial.println(darkAvg);
-
-  lcdStatus("CAL", "Shine Laser...");
-  delay(2000);
-
-  for (int i=0; i<50; i++) { brightSum += analogRead(LDR_PIN); delay(20); }
-  int brightAvg = brightSum / 50;
-
-  Serial.print("[CAL] Bright avg = ");
-  Serial.println(brightAvg);
-
-  threshold = (darkAvg + brightAvg) / 2;
-
-  lcdStatus("CAL Done", "Thresh=" + String(threshold));
-  Serial.print("[CAL] Threshold = ");
-  Serial.println(threshold);
-  Serial.println("[CAL] Calibration complete.\n");
-}
-
-// ===== READ ONE BIT =====
-bool readBit() {
-  int val = analogRead(LDR_PIN);
-  bool bitVal = (val < threshold);
-
-  digitalWrite(LED_PIN, bitVal ? HIGH : LOW);
-  noTone(BUZZER_PIN);   // avoid noise during RX
-
-  return bitVal;
-}
-
-// ===== RECEIVING LOOP =====
+// ===== Receive Morse =====
 void receiveLoop() {
-  lcdStatus("Mode: RX", "Listening...");
+  lcdShow("RX Mode","Listening...");
   Serial.println("[RX] Listening...");
+  delay(1000);
 
-  delay(1000);  // Allow TX to begin
+  String morseBuffer="";
+  unsigned long lastChange=millis();
+  bool prevLight=false;
+  unsigned long now,duration;
 
-  String msg = "";
-  char c = 0;
-  int bitCount = 0;
+  while(isReceiving) {
+    int val=analogRead(LDR_PIN);
+    bool isOn=(val<THRESH);
+    now=millis();
+    duration=now-lastChange;
 
-  while (isReceiving) {
+    if(isOn!=prevLight){ // transition
+      lastChange=now;
 
-    bool bitVal = readBit();
-    delay(BIT_DELAY);
-
-    c = (c << 1) | bitVal;
-    bitCount++;
-
-    if (bitCount == 8) {
-      msg += (char)c;
-      Serial.print((char)c);
-
-      if (msg.endsWith("<END>")) {
-        msg.remove(msg.length() - 5);
-
-        lcdStatus("RX:", msg.substring(0,16));
-
-        Serial.println("\n\n[RX] MESSAGE RECEIVED:");
-        Serial.println(msg);
-        Serial.println("------------------------");
-
-        isReceiving = false;   // ✅ stop receiving immediately
-        break;
+      if(isOn){ // just turned ON ⇒ OFF gap ended
+        if(duration>WORD_GAP){ Serial.print(' '); lcdShow("RX:"," "); }
+        else if(duration>DOT*2){
+          char decoded=decodeMorse(morseBuffer);
+          Serial.print(decoded);
+          lcdShow("RX:",String(decoded));
+          morseBuffer="";
+        }
+      } else { // just turned OFF ⇒ ON ended
+        if(duration<DOT*2) morseBuffer+=".";
+        else morseBuffer+="-";
       }
-
-      c = 0;
-      bitCount = 0;
+      prevLight=isOn;
     }
 
-    if (Serial.available()) {
-      Serial.read();
-      isReceiving = false;
-      lcdStatus("RX Exit", "");
-      Serial.println("\n[RX] Exiting...");
-      break;
-    }
+    if(Serial.available()){ Serial.read(); isReceiving=false; break; }
   }
-
-  digitalWrite(LED_PIN, LOW);
-  noTone(BUZZER_PIN);
+  lcdShow("RX Stopped");
+  Serial.println("\n[RX] Stopped.\n");
 }
 
-// ===== SETUP =====
-void setup() {
-  pinMode(LASER_PIN, OUTPUT);
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
-
-  digitalWrite(LASER_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
+// ===== Setup =====
+void setup(){
+  pinMode(LASER_PIN,OUTPUT);
+  pinMode(LED_PIN,OUTPUT);
+  pinMode(BUZZER_PIN,OUTPUT);
+  digitalWrite(LASER_PIN,LOW);
+  digitalWrite(LED_PIN,LOW);
   noTone(BUZZER_PIN);
 
-  lcd.init();
-  lcd.backlight();
-  lcdStatus("SeCure BEAM", "Ready");
-
+  lcd.init(); lcd.backlight();
+  lcdShow("SeCure BEAM","Ready");
   Serial.begin(9600);
-  Serial.println("===== LASER LINK READY =====");
-  Serial.println("Commands:");
-  Serial.println("  TX <msg>");
-  Serial.println("  RX");
-  Serial.println("  CAL");
-  Serial.println("=================================\n");
+  Serial.println("==== LASER MORSE LINK READY ====");
+  Serial.println("Commands: TX <msg> | RX");
 }
 
-// ===== MAIN LOOP =====
-void loop() {
-  if (Serial.available()) {
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-
-    if (input.startsWith("TX ")) {
-      transmitMessage(input.substring(3));
-    }
-
-    else if (input.equalsIgnoreCase("RX")) {
-      isReceiving = true;
+// ===== Main loop =====
+void loop(){
+  if(Serial.available()){
+    String cmd=Serial.readStringUntil('\n');
+    cmd.trim();
+    if(cmd.startsWith("TX ")){
+      transmitMessage(cmd.substring(3));
+    } else if(cmd.equalsIgnoreCase("RX")){
+      isReceiving=true;
       receiveLoop();
-    }
-
-    else if (input.equalsIgnoreCase("CAL")) {
-      autoCalibrate();
-    }
-
-    else {
-      Serial.println("Use: TX <msg> / RX / CAL");
+    } else {
+      Serial.println("Use: TX <msg> or RX");
     }
   }
 }
