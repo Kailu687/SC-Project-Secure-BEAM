@@ -1,6 +1,8 @@
 # SC-Project
 Semiconductor Physics project for Fall Semester 2025 (1st sem)
+
 Handling Faculty: Dr. Jitendra Narayana Dash
+
 Students:
 Asmi S Thirunarayan        25BEC1584
 Gitika M                   25BEC1118 
